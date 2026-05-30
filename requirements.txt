@@ -1,0 +1,14 @@
+fastapi
+fastapi-limiter
+uvicorn
+orjson
+
+redis
+aiokafka
+
+polars
+pydantic-settings
+pydantic
+
+pytest
+httpx2
