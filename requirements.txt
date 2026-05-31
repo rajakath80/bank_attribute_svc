@@ -6,6 +6,8 @@ orjson
 redis
 aiokafka
 
+plaid-python
+
 polars
 pydantic-settings
 pydantic

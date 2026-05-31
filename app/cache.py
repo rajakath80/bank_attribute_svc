@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Any
 
-from app.config import settings
+from app.core.config import settings
 from app.models import AttributeRequest
 
 logger = logging.getLogger(__name__)

@@ -1,32 +1,59 @@
 # bank-attribute-service
 
-High-throughput transaction → ML feature pipeline.  
-Accepts a batch of raw bank transactions and returns per-account attribute vectors in **under ~0.7s end-to-end on 100k records.**.
+High-throughput transaction → ML feature pipeline.
+Accepts a batch of raw bank transactions and returns per-account attribute vectors with risk scoring decisions.
+
+---
+
+## Performance
+
+| Scenario | Time |
+|----------|------|
+| 100k transactions → 1,000 accounts | **~1.2s end-to-end** |
+| 1M transactions → 10,000 accounts | **~14.7s end-to-end** |
+| Cache hit (Redis) | **<50ms** |
 
 ---
 
 ## Architecture
 
+![Architecture diagram](service_architecture.svg)
+
 ```
-POST /attributes
-      │
-      ▼
- AttributeRequest (Pydantic v2)
-      │
-      ▼
- Normalizer  ──── dedup on transaction_id
-      │            dtype enforcement
-      ▼
- Polars Engine ─── single lazy group_by + agg
-      │             all metrics in one pass
-      ▼
- Redis Cache  ──── SHA-256 key of sorted payload
-      │             TTL: 5 min (configurable)
-      ▼
- AttributeResponse
+Plaid API / Batch POST / generate_data.py
+              │
+              ▼
+      FastAPI  ·  POST /attributes  ·  GET /demo/plaid
+      Rate limiter · Pydantic v2 validation
+              │                        │
+              ▼                        ▼ fire & forget
+        Redis cache              Kafka (KRaft)
+        SHA-256 key              raw_transactions topic
+        TTL 5 min                → fraud svc, ML retraining
+              │
+              ▼
+         Normalizer
+         dedup · dtype enforcement
+              │
+              ▼
+        Polars engine
+        single lazy group_by + agg · streaming · async
+              │
+              ▼
+       Metric registry
+       txn volume · recency · spend category · channel · cash flow
+              │
+              ▼
+         Risk scorer
+         net_flow · salary · overdraft_risk · inactivity
+              │
+     ┌────────┼────────┐
+     ▼        ▼        ▼
+  APPROVE   REVIEW  DECLINE
+  score≥70  50–69   <50
 ```
 
-**Stack:** FastAPI · Polars (lazy + streaming) · Pydantic v2 · Redis · pytest
+**Stack:** FastAPI · Polars (lazy + streaming) · Pydantic v2 · Redis · Kafka (KRaft) · Plaid · pytest
 
 ---
 
@@ -38,26 +65,41 @@ POST /attributes
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. (Optional) start Redis for caching
-docker run -d -p 6379:6379 redis:7-alpine
+# 2. Copy and configure environment
+cp .env.example .env
 
-# 3. Start the service
+# 3. Start Redis and Kafka
+docker compose up redis kafka
+
+# 4. Start the service
 uvicorn app.main:app --reload
 
-# 4. Generate test data
-python scripts/generate_data.py
+# 5. Generate test data
+make generate
 
-# 5. POST 100k transactions
-curl -s -X POST http://localhost:8000/attributes \
-     -H 'Content-Type: application/json' \
-     -d @data/transactions_100k.json \
-     | python -m json.tool | head -60
+# 6. POST 100k transactions
+make demo
 ```
 
-### Option B – Docker Compose (Redis + App)
+### Option B – Docker Compose (all services)
 
 ```bash
-docker compose up --build
+make build
+make up
+```
+
+---
+
+## Makefile
+
+```bash
+make build      # build Docker image
+make up         # start all services
+make down       # stop all services
+make generate   # generate 100k synthetic transactions
+make demo       # POST 100k records and show response
+make test       # run pytest suite
+make plaid      # run end-to-end Plaid sandbox demo
 ```
 
 ---
@@ -115,7 +157,12 @@ docker compose up --build
       "cashflow_net": -45.99,
       "cashflow_credit": 0.0,
       "cashflow_debit": -45.99,
-      "cashflow_txn_count": 1
+      "cashflow_txn_count": 1,
+      "risk": {
+        "score": 80,
+        "decision": "APPROVE",
+        "risk_tier": "LOW"
+      }
     }
   },
   "meta": {
@@ -126,6 +173,14 @@ docker compose up --build
     "cache_hit": false
   }
 }
+```
+
+### `GET /demo/plaid`
+
+End-to-end Plaid sandbox demo — creates a sandbox token, fetches real transactions, runs the full attribute + risk pipeline.
+
+```bash
+make plaid
 ```
 
 ---
@@ -143,9 +198,8 @@ docker compose up --build
 ### Adding a metric (one line)
 
 ```python
-# In app/registry.py or anywhere that imports metric_registry:
-from app.registry import metric_registry, CashFlowMetric
-metric_registry.register(CashFlowMetric(window_days=14, min_transactions=2))
+from app.metrics.registry import metric_registry, CashFlowMetric
+metric_registry.replace(CashFlowMetric(window_days=14, min_transactions=2))
 ```
 
 Or write your own:
@@ -163,62 +217,45 @@ metric_registry.register(MyMetric())
 
 ---
 
+## Risk Scorer
+
+| Signal | Effect |
+|--------|--------|
+| `net_flow < 0` | −20 pts |
+| `salary_credit > 5000` | +15 pts |
+| `days_since_last_txn > 90` | −15 pts |
+| `digital_ratio > 0.4` | +10 pts |
+| `cashflow_net < −500` | −10 pts |
+| `overdraft_risk > 200` | −15 pts |
+
+---
+
 ## Tests
 
 ```bash
-pytest -v                         # all tests
-pytest tests/test_benchmark.py -v -s   # benchmark with timing output
-pytest tests/test_determinism.py -v    # determinism suite
-pytest tests/test_metrics.py -v        # metric correctness
+make test
 ```
 
-Expected output:
-
 ```
+22 passed in 5.03s
 tests/test_benchmark.py::TestBenchmark::test_full_pipeline_100k_under_4s PASSED
-[BENCHMARK] 100k rows | normalise=0.412s | engine=1.834s | total=2.246s
+[BENCHMARK] 100k rows | normalise=0.226s | engine=0.059s | total=0.285s
 ```
 
 ---
 
 ## Configuration
 
-All settings can be overridden via environment variables or a `.env` file.
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
-| `MAX_BATCH_SIZE` | `200000` | Max transactions per request |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker |
+| `PLAID_CLIENT_ID` | — | Plaid API client ID |
+| `PLAID_SECRET` | — | Plaid API secret |
+| `PLAID_ENV` | `sandbox` | `sandbox` / `production` |
+| `MAX_BATCH_SIZE` | `1000000` | Max transactions per request |
 | `CACHE_TTL_SECONDS` | `300` | Redis TTL (5 min) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
-
----
-
-## Loom Demo Script
-
-**Scene 1 – Throughput**
-```bash
-# Terminal 1: start service
-uvicorn app.main:app
-
-# Terminal 2: generate + POST 100k records
-python scripts/generate_data.py
-time curl -s -X POST http://localhost:8000/attributes \
-     -H 'Content-Type: application/json' \
-     -d @data/transactions_100k.json > /dev/null
-```
-
-**Scene 2 – Add a metric in one line**
-Open `app/registry.py`, scroll to the bottom, and add:
-```python
-metric_registry.register(CashFlowMetric(window_days=14, min_transactions=2))
-```
-Re-run the curl. Show `cashflow_net` (14-day window) in the JSON response.
-
-**Scene 3 – Tests**
-```bash
-pytest -v --tb=short
-```
 
 ---
 
@@ -227,22 +264,42 @@ pytest -v --tb=short
 ```
 bank-attribute-service/
 ├── app/
-│   ├── main.py          # FastAPI entry
-│   ├── models.py        # Pydantic schemas
-│   ├── normalizer.py    # Dedup + dtype enforcement
-│   ├── registry.py      # Metric registry + built-in metrics
-│   ├── engine.py        # Polars computation engine
-│   ├── cache.py         # Redis layer (graceful fallback)
-│   └── config.py        # Pydantic Settings
+│   ├── api/
+│   │   └── routes.py
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── engine.py
+│   │   ├── normalizer.py
+│   │   └── scorer.py
+│   ├── integrations/
+│   │   ├── plaid/
+│   │   │   ├── client.py
+│   │   │   └── adapter.py
+│   │   └── kafka/
+│   │       ├── producer.py
+│   │       └── consumer.py
+│   ├── metrics/
+│   │   ├── registry.py
+│   │   ├── volume.py
+│   │   ├── recency.py
+│   │   ├── category.py
+│   │   ├── channel.py
+│   │   └── cashflow.py
+│   ├── models.py
+│   ├── cache.py
+│   └── main.py
 ├── tests/
-│   ├── conftest.py
-│   ├── test_determinism.py
-│   ├── test_metrics.py
-│   └── test_benchmark.py
+│   ├── unit/
+│   ├── integration/
+│   ├── benchmark/
+│   └── conftest.py
 ├── scripts/
-│   └── generate_data.py  # 100k synthetic transactions
+│   └── generate_data.py
+├── docs/
+│   └── architecture.svg
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
+├── Makefile
 └── README.md
 ```

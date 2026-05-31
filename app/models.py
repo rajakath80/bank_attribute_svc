@@ -58,7 +58,7 @@ class AttributeRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_batch_size(self) -> "AttributeRequest":
-        from app.config import settings
+        from app.core.config import settings
 
         limit = settings.max_batch_size
         if len(self.transactions) > limit:

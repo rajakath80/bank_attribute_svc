@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # bank-attribute-service · Docker Compose
 #
@@ -29,17 +27,9 @@ services:
       timeout: 3s
       retries: 5
 
-  zookeeper:
-    image: zookeeper:latest
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-    - "2181:2181"
-
   kafka:
     image: apache/kafka:latest
-    depends_on:
-      - zookeeper
+    container_name: bas-kafka
     ports:
       - "9092:9092"
     environment:

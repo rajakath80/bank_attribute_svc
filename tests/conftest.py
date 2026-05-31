@@ -9,18 +9,16 @@ import random
 from datetime import date, timedelta
 
 import pytest
-import polars as pl
 from fastapi.testclient import TestClient
 
+from app.core.normalizer import normalize
 from app.main import app
-from app.models import Transaction, AttributeRequest
-from app.normalizer import normalize
-from app.registry import metric_registry
-
+from app.models import AttributeRequest, Transaction
 
 # ---------------------------------------------------------------------------
 # HTTP client
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def client():
@@ -33,6 +31,7 @@ def client():
 # Transaction factories
 # ---------------------------------------------------------------------------
 
+
 def _make_transaction(
     transaction_id: str | None = None,
     account_id: str = "ACC-000001",
@@ -42,6 +41,7 @@ def _make_transaction(
     channel: str = "POS",
 ) -> Transaction:
     import uuid
+
     return Transaction(
         transaction_id=transaction_id or str(uuid.uuid4()),
         account_id=account_id,
@@ -62,19 +62,23 @@ def two_account_txns():
     """10 transactions across 2 accounts."""
     txns = []
     for i in range(5):
-        txns.append(_make_transaction(
-            account_id="ACC-000001",
-            amount=-float(i * 10 + 10),
-            transaction_date=date(2024, 1, 1) + timedelta(days=i),
-        ))
+        txns.append(
+            _make_transaction(
+                account_id="ACC-000001",
+                amount=-float(i * 10 + 10),
+                transaction_date=date(2024, 1, 1) + timedelta(days=i),
+            )
+        )
     for i in range(5):
-        txns.append(_make_transaction(
-            account_id="ACC-000002",
-            amount=float(i * 100 + 100),
-            merchant_category="SALARY",
-            channel="ACH",
-            transaction_date=date(2024, 1, 1) + timedelta(days=i),
-        ))
+        txns.append(
+            _make_transaction(
+                account_id="ACC-000002",
+                amount=float(i * 100 + 100),
+                merchant_category="SALARY",
+                channel="ACH",
+                transaction_date=date(2024, 1, 1) + timedelta(days=i),
+            )
+        )
     return txns
 
 
@@ -91,14 +95,17 @@ def large_request():
     channels = ["POS", "ACH", "ATM"]
     txns = []
     for i in range(10_000):
-        txns.append(Transaction(
-            transaction_id=f"TXN-{i:08d}",
-            account_id=f"ACC-{(i % 100):04d}",
-            amount=round(random.uniform(-500, 500), 2),
-            transaction_date=date(2024, 1, 1) + timedelta(days=random.randint(0, 364)),
-            merchant_category=random.choice(categories),
-            channel=random.choice(channels),
-        ))
+        txns.append(
+            Transaction(
+                transaction_id=f"TXN-{i:08d}",
+                account_id=f"ACC-{(i % 100):04d}",
+                amount=round(random.uniform(-500, 500), 2),
+                transaction_date=date(2024, 1, 1)
+                + timedelta(days=random.randint(0, 364)),
+                merchant_category=random.choice(categories),
+                channel=random.choice(channels),
+            )
+        )
     return AttributeRequest(transactions=txns)
 
 
